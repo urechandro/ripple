@@ -28,16 +28,14 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
-brews:
+homebrew_casks:
   - name: ripple
+    directory: Casks
     repository:
       owner: urechandro
       name: homebrew-ripple
     homepage: "https://github.com/urechandro/ripple"
     description: "Watch Go file changes and run only the tests affected by your edit"
-    license: "MIT"
-    test: |
-      system "#{bin}/ripple", "--help"
 
 changelog:
   sort: asc
