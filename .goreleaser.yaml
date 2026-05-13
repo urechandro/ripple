@@ -1,3 +1,6 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
 version: 2
 
 before:
@@ -5,7 +8,8 @@ before:
     - go mod tidy
 
 builds:
-  - env:
+  - main: ./...
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
@@ -20,7 +24,11 @@ builds:
 
 archives:
   - formats: [tar.gz]
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
     format_overrides:
       - goos: windows
         formats: [zip]
