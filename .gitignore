@@ -1,0 +1,24 @@
+# Binary
+ripple
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Dependency cache
+vendor/
+
+# Build output
+dist/
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
