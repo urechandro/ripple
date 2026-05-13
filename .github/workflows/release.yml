@@ -31,4 +31,17 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      - name: Push cask to homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git clone https://x-access-token:${TAP_TOKEN}@github.com/urechandro/homebrew-ripple.git /tmp/homebrew-ripple
+          mkdir -p /tmp/homebrew-ripple/Casks
+          cp dist/homebrew/Casks/ripple.rb /tmp/homebrew-ripple/Casks/ripple.rb
+          cd /tmp/homebrew-ripple
+          git add Casks/ripple.rb
+          git commit -m "chore: update ripple cask to ${GITHUB_REF_NAME}"
+          git push

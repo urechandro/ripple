@@ -39,10 +39,10 @@ checksum:
 homebrew_casks:
   - name: ripple
     directory: Casks
+    skip_upload: true
     repository:
       owner: urechandro
       name: homebrew-ripple
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/urechandro/ripple"
     description: "Watch Go file changes and run only the tests affected by your edit"
 
