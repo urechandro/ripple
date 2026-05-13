@@ -41,6 +41,12 @@ jobs:
           git clone https://x-access-token:${TAP_TOKEN}@github.com/urechandro/homebrew-ripple.git /tmp/homebrew-ripple
           mkdir -p /tmp/homebrew-ripple/Casks
           cp dist/homebrew/Casks/ripple.rb /tmp/homebrew-ripple/Casks/ripple.rb
+          python3 -c "
+content = open('/tmp/homebrew-ripple/Casks/ripple.rb').read()
+postflight = '\n  postflight do\n    system \"xattr\", \"-d\", \"com.apple.quarantine\", \"\#{staged_path}/ripple\"\n  end\n'
+idx = content.rfind('\nend')
+open('/tmp/homebrew-ripple/Casks/ripple.rb', 'w').write(content[:idx] + postflight + content[idx:])
+"
           cd /tmp/homebrew-ripple
           git add Casks/ripple.rb
           git commit -m "chore: update ripple cask to ${GITHUB_REF_NAME}"
