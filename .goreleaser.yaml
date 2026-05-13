@@ -45,8 +45,6 @@ homebrew_casks:
       name: homebrew-ripple
     homepage: "https://github.com/urechandro/ripple"
     description: "Watch Go file changes and run only the tests affected by your edit"
-    post_install:
-      - "xattr -d com.apple.quarantine #{bin}/ripple || true"
 
 changelog:
   sort: asc
