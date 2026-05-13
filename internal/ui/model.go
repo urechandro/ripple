@@ -123,7 +123,8 @@ type Model struct {
 	expectedTests      int
 	expectedUnfiltered int
 	packages        map[string]*packageResult
-	pkgOrder        []string // stable display order
+	pkgOrder        []string      // display order — populated lazily as events arrive
+	pkgInOrder      map[string]bool // set for O(1) membership check
 	running         bool
 	width           int
 	height          int
@@ -140,6 +141,7 @@ func New(root string, graph *depgraph.Graph, cg *callgraph.Graph, watcher *fsnot
 		watcher:      watcher,
 		eventCh:      make(chan runner.TestEvent, 256),
 		packages:     make(map[string]*packageResult),
+		pkgInOrder:   make(map[string]bool),
 		pendingFiles: make(map[string]bool),
 		skipPatterns: skipPatterns,
 		depth:        depth,
@@ -240,6 +242,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Always clear previous results immediately so stale output is never visible.
 		m.packages = make(map[string]*packageResult)
 		m.pkgOrder = nil
+		m.pkgInOrder = make(map[string]bool)
 		m.running = false
 
 		if len(affectedSet) == 0 {
@@ -322,7 +325,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, pkg := range affected {
 			if reason := m.skipReason(pkg); reason != "" {
 				m.packages[pkg] = &packageResult{importPath: pkg, status: "skipped", skipReason: reason}
-				m.pkgOrder = append(m.pkgOrder, pkg)
+				m.pkgOrder = append(m.pkgOrder, pkg) // skipped is resolved immediately, show it now
+				m.pkgInOrder[pkg] = true
 				m.debugRun.pkgs = append(m.debugRun.pkgs, pkgDebug{
 					importPath: pkg,
 					reason:     "skipped [" + reason + "]",
@@ -358,7 +362,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.debugRun.pkgs = append(m.debugRun.pkgs, dbg)
 			m.packages[pkg] = &packageResult{importPath: pkg, status: "running", runFilter: pt.RunFilter}
-			m.pkgOrder = append(m.pkgOrder, pkg)
+			// pkgOrder is NOT populated here — packages appear lazily when their first event arrives.
 			toRun = append(toRun, pt)
 		}
 
@@ -399,6 +403,10 @@ func (m *Model) handleTestEvent(ev runner.TestEvent) {
 	pkg, ok := m.packages[ev.Package]
 	if !ok {
 		return
+	}
+	if !m.pkgInOrder[ev.Package] {
+		m.pkgOrder = append(m.pkgOrder, ev.Package)
+		m.pkgInOrder[ev.Package] = true
 	}
 
 	switch ev.Action {
