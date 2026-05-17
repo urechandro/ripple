@@ -16,9 +16,14 @@ vendor/
 # Build output
 dist/
 
+# Scout index
+.scout/
+
 # Editor
 .DS_Store
 .idea/
 .vscode/
 *.swp
 *.swo
+.mcp.json
+CLAUDE.md
