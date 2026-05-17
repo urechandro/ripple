@@ -69,7 +69,10 @@ type testEventMsg struct {
 	gen int
 }
 type runDoneMsg struct{ gen int }
-type graphRebuiltMsg struct{ cg *callgraph.Graph }
+type graphRebuiltMsg struct {
+	graph *depgraph.Graph
+	cg    *callgraph.Graph
+}
 
 // ── Debug info ────────────────────────────────────────────────────────────────
 
@@ -174,7 +177,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.rebuildingGraph {
 				m.rebuildingGraph = true
 				m.refreshViewport()
-				return m, rebuildGraph(m.graph.ModuleRoots(), m.cgMethod)
+				return m, rebuildAll(m.root, m.cgMethod)
 			}
 		case "d":
 			m.debug = !m.debug
@@ -192,6 +195,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, vpCmd
 
 	case graphRebuiltMsg:
+		if msg.graph != nil {
+			m.graph = msg.graph
+		}
 		m.cg = msg.cg
 		m.rebuildingGraph = false
 		m.refreshViewport()
@@ -217,10 +223,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingFiles[msg.path] = true
 		m.debounceGen++
 		gen := m.debounceGen
-		return m, tea.Batch(
+
+		cmds := []tea.Cmd{
 			listenForFileChange(m.watcher),
 			scheduleRun(gen),
-		)
+		}
+
+		if m.isStructuralChange(msg.path) && !m.rebuildingGraph {
+			m.rebuildingGraph = true
+			cmds = append(cmds, rebuildAll(m.root, m.cgMethod))
+		}
+
+		return m, tea.Batch(cmds...)
 
 	// Fires after the debounce window; stale messages are ignored via gen.
 	case debouncedRunMsg:
@@ -833,11 +847,26 @@ func runTests(ctx context.Context, gen int, pkgsByModule map[string][]runner.Pac
 	}
 }
 
-func rebuildGraph(modRoots []string, method callgraph.Method) tea.Cmd {
+func rebuildAll(root string, method callgraph.Method) tea.Cmd {
 	return func() tea.Msg {
-		cg, _ := callgraph.Build(modRoots, method)
-		return graphRebuiltMsg{cg: cg}
+		graph, err := depgraph.Build(root)
+		if err != nil {
+			return graphRebuiltMsg{}
+		}
+		cg, _ := callgraph.Build(graph.ModuleRoots(), method)
+		return graphRebuiltMsg{graph: graph, cg: cg}
 	}
+}
+
+// isStructuralChange returns true if the changed file indicates the dep graph
+// may be stale: go.mod changes, or a .go file in a directory the graph doesn't
+// know about (new package).
+func (m Model) isStructuralChange(path string) bool {
+	if strings.HasSuffix(path, "go.mod") || strings.HasSuffix(path, "go.sum") {
+		return true
+	}
+	_, known := m.graph.FileToImport(path)
+	return !known
 }
 
 // wrapList joins items with sep and wraps them so no line exceeds totalWidth
