@@ -1,0 +1,56 @@
+name: Ripple (affected tests only)
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  ripple:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build ripple
+        run: go build -o ripple .
+
+      - name: Find changed Go files
+        id: changed
+        run: |
+          FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.go' | paste -sd, -)
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          if [ -z "$FILES" ]; then
+            echo "No .go files changed"
+          else
+            echo "Changed: $FILES"
+          fi
+
+      - name: Run affected tests
+        if: steps.changed.outputs.files != ''
+        run: |
+          OUTPUT=$(./ripple -json -run -files "${{ steps.changed.outputs.files }}" 2>/dev/null)
+          echo "$OUTPUT" | jq .
+
+          # Extract summary and set exit code.
+          FAILED=$(echo "$OUTPUT" | jq -r '.summary.tests_failed // 0')
+          PASSED=$(echo "$OUTPUT" | jq -r '.summary.tests_passed // 0')
+          PKG_FAILED=$(echo "$OUTPUT" | jq -r '.summary.packages_failed // 0')
+
+          echo ""
+          echo "=== Summary ==="
+          echo "Tests passed: $PASSED"
+          echo "Tests failed: $FAILED"
+          echo "Packages failed: $PKG_FAILED"
+
+          if [ "$FAILED" -gt 0 ] || [ "$PKG_FAILED" -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: No Go changes
+        if: steps.changed.outputs.files == ''
+        run: echo "No .go files changed — skipping tests"
