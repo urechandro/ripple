@@ -212,8 +212,12 @@ func parseRange(s string) (start, count int) {
 	return
 }
 
-// RunFilter builds a -run regex from a list of test names.
-// Returns empty string if names is empty (meaning: run all tests).
+// RunFilter builds a -run regex from a list of test names, suitable for
+// passing to `go test -run`. Returns empty string if names is empty
+// (meaning: run all tests in the package).
 func RunFilter(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
 	return strings.Join(names, "|")
 }
