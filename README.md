@@ -56,6 +56,46 @@ Save a `.go` file and ripple will immediately run only the tests relevant to you
 
 CHA is the better default for most projects. Use RTA if you want tighter targeting and don't mind the slower startup.
 
+## CI
+
+ripple has a JSON mode designed for CI pipelines. Instead of running your full test suite on every PR, ripple finds which `.go` files changed, traces the blast radius through the dependency and call graphs, and runs only the affected tests.
+
+### GitHub Actions example
+
+```yaml
+- name: Build ripple
+  run: go install github.com/urechandro/ripple@latest
+
+- name: Find changed Go files
+  id: changed
+  run: |
+    FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.go' | paste -sd, -)
+    echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+- name: Run affected tests
+  if: steps.changed.outputs.files != ''
+  run: |
+    OUTPUT=$(ripple -json -run -method cha -depth -1 -files "${{ steps.changed.outputs.files }}" 2>/dev/null)
+    echo "$OUTPUT" | jq .
+    FAILED=$(echo "$OUTPUT" | jq -r '.summary.tests_failed // 0')
+    if [ "$FAILED" -gt 0 ]; then exit 1; fi
+```
+
+### Recommended CI settings
+
+Use `-method cha -depth -1` for CI:
+
+- **CHA** is conservative — it may run a few extra tests but will never miss one. A false "pass" in CI is worse than running 10 extra tests.
+- **`-depth -1`** walks the full transitive dependency graph. At the default `-depth 1`, a test two hops away from your change could be missed.
+
+### What ripple can't see
+
+- **Reflection / `go:linkname` / assembly** — calls invisible to static analysis won't be traced.
+- **Non-Go files** — changes to `testdata/`, config, or build-tag-gated code won't trigger tests.
+- **Init-time side effects** — `init()` functions are caught by the dep graph but the call graph can't narrow to specific tests.
+
+For maximum safety, pair ripple with a periodic full `go test ./...` run (e.g. nightly or on merge to main).
+
 ## License
 
 MIT

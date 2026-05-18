@@ -33,7 +33,7 @@ jobs:
       - name: Run affected tests
         if: steps.changed.outputs.files != ''
         run: |
-          OUTPUT=$(./ripple -json -run -files "${{ steps.changed.outputs.files }}" 2>/dev/null)
+          OUTPUT=$(./ripple -json -run -method cha -depth -1 -files "${{ steps.changed.outputs.files }}" 2>/dev/null)
           echo "$OUTPUT" | jq .
 
           # Extract summary and set exit code.
