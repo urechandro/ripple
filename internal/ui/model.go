@@ -106,8 +106,9 @@ type Model struct {
 	depth        int
 	cgMethod     callgraph.Method
 
-	pendingFiles map[string]bool // files changed but not yet processed
-	debounceGen  int             // incremented each time a new file change arrives
+	pendingFiles      map[string]bool // files changed but not yet processed
+	pendingStructural map[string]bool // structural changes awaiting rebuild
+	debounceGen       int             // incremented each time a new file change arrives
 
 	lastEvent       string // raw fsnotify path, for diagnostics
 	lastChanged     string // description of what triggered the current run
@@ -143,9 +144,10 @@ func New(root string, graph *depgraph.Graph, cg *callgraph.Graph, watcher *fsnot
 		cg:           cg,
 		watcher:      watcher,
 		eventCh:      make(chan runner.TestEvent, 256),
-		packages:     make(map[string]*packageResult),
-		pkgInOrder:   make(map[string]bool),
-		pendingFiles: make(map[string]bool),
+		packages:          make(map[string]*packageResult),
+		pkgInOrder:        make(map[string]bool),
+		pendingFiles:      make(map[string]bool),
+		pendingStructural: make(map[string]bool),
 		skipPatterns: skipPatterns,
 		depth:        depth,
 		cgMethod:     cgMethod,
@@ -221,20 +223,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fileChangedMsg:
 		m.lastEvent = msg.path
 		m.pendingFiles[msg.path] = true
+		if m.isStructuralChange(msg.path) {
+			m.pendingStructural[msg.path] = true
+		}
 		m.debounceGen++
 		gen := m.debounceGen
-
-		cmds := []tea.Cmd{
+		return m, tea.Batch(
 			listenForFileChange(m.watcher),
 			scheduleRun(gen),
-		}
-
-		if m.isStructuralChange(msg.path) && !m.rebuildingGraph {
-			m.rebuildingGraph = true
-			cmds = append(cmds, rebuildAll(m.root, m.cgMethod))
-		}
-
-		return m, tea.Batch(cmds...)
+		)
 
 	// Fires after the debounce window; stale messages are ignored via gen.
 	case debouncedRunMsg:
@@ -244,6 +241,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		files := m.pendingFiles
 		m.pendingFiles = make(map[string]bool)
+
+		structuralFiles := m.pendingStructural
+		m.pendingStructural = make(map[string]bool)
+
+		// Kick off an incremental graph rebuild for dirty modules.
+		var rebuildCmd tea.Cmd
+		if len(structuralFiles) > 0 && !m.rebuildingGraph {
+			m.rebuildingGraph = true
+			rebuildCmd = rebuildIncremental(m.graph, structuralFiles, m.cgMethod)
+		}
 
 		// Compute union of affected packages across all changed files.
 		affectedSet := map[string]bool{}
@@ -262,7 +269,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(affectedSet) == 0 {
 			m.lastStatus = dimStyle.Render("no tests affected")
 			m.refreshViewport()
-			return m, nil
+			return m, rebuildCmd
 		}
 
 		// Cancel any in-flight run before starting a new one.
@@ -382,10 +389,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.viewport.GotoTop()
 		m.refreshViewport()
-		return m, tea.Batch(
+		cmds := []tea.Cmd{
 			runTests(runCtx, m.runGen, groupByModule(m.graph, toRun), m.eventCh),
 			listenForTestEvent(m.eventCh, m.runGen),
-		)
+		}
+		if rebuildCmd != nil {
+			cmds = append(cmds, rebuildCmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case testEventMsg:
 		if msg.gen != m.runGen {
@@ -858,9 +869,27 @@ func rebuildAll(root string, method callgraph.Method) tea.Cmd {
 	}
 }
 
-// isStructuralChange returns true if the changed file indicates the dep graph
-// may be stale: go.mod changes, or a .go file in a directory the graph doesn't
-// know about (new package).
+func rebuildIncremental(graph *depgraph.Graph, structuralFiles map[string]bool, method callgraph.Method) tea.Cmd {
+	dirtyModules := map[string]bool{}
+	for path := range structuralFiles {
+		if modRoot, ok := graph.ModuleForFile(path); ok {
+			dirtyModules[modRoot] = true
+		}
+	}
+	if len(dirtyModules) == 0 {
+		return nil
+	}
+	roots := make([]string, 0, len(dirtyModules))
+	for r := range dirtyModules {
+		roots = append(roots, r)
+	}
+	return func() tea.Msg {
+		graph.ReingestModules(roots)
+		cg, _ := callgraph.Build(graph.ModuleRoots(), method)
+		return graphRebuiltMsg{graph: graph, cg: cg}
+	}
+}
+
 func (m Model) isStructuralChange(path string) bool {
 	if strings.HasSuffix(path, "go.mod") || strings.HasSuffix(path, "go.sum") {
 		return true

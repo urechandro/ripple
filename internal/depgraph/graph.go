@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 )
@@ -29,6 +30,9 @@ type Graph struct {
 	pkgTestFiles map[string][]string // import path → abs paths of test files
 	pkgDir       map[string]string   // import path → package directory
 	pkgAllFiles  map[string][]string // import path → all Go files (source + test)
+
+	// Cached go list output per module root for incremental rebuilds.
+	modPackages map[string][]listPackage
 }
 
 // Build walks root for every go.mod (i.e. every module) and runs `go list`
@@ -51,6 +55,7 @@ func Build(root string) (*Graph, error) {
 		pkgTestFiles: make(map[string][]string),
 		pkgDir:       make(map[string]string),
 		pkgAllFiles:  make(map[string][]string),
+		modPackages:  make(map[string][]listPackage),
 	}
 
 	for _, modRoot := range modRoots {
@@ -60,6 +65,7 @@ func Build(root string) (*Graph, error) {
 		}
 	}
 
+	g.rebuildDependents()
 	return g, nil
 }
 
@@ -87,11 +93,21 @@ func findModuleRoots(root string) ([]string, error) {
 
 // ingest runs `go list -json ./...` in modRoot and merges packages into g.
 func (g *Graph) ingest(modRoot string) error {
+	pkgs, err := goList(modRoot)
+	if err != nil {
+		return err
+	}
+	g.modPackages[modRoot] = pkgs
+	g.applyPackages(modRoot, pkgs)
+	return nil
+}
+
+func goList(modRoot string) ([]listPackage, error) {
 	cmd := exec.Command("go", "list", "-json", "./...")
 	cmd.Dir = modRoot
 	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("go list: %w", err)
+		return nil, fmt.Errorf("go list: %w", err)
 	}
 
 	var pkgs []listPackage
@@ -99,11 +115,14 @@ func (g *Graph) ingest(modRoot string) error {
 	for dec.More() {
 		var p listPackage
 		if err := dec.Decode(&p); err != nil {
-			return fmt.Errorf("decode: %w", err)
+			return nil, fmt.Errorf("decode: %w", err)
 		}
 		pkgs = append(pkgs, p)
 	}
+	return pkgs, nil
+}
 
+func (g *Graph) applyPackages(modRoot string, pkgs []listPackage) {
 	for _, p := range pkgs {
 		allFiles := append(append(p.GoFiles, p.TestGoFiles...), p.XTestGoFiles...)
 		for _, f := range allFiles {
@@ -122,23 +141,26 @@ func (g *Graph) ingest(modRoot string) error {
 			g.pkgAllFiles[p.ImportPath] = append(g.pkgAllFiles[p.ImportPath], filepath.Join(p.Dir, f))
 		}
 	}
+}
 
-	// Build reverse dep map: for each package, record which packages import it.
+// rebuildDependents reconstructs the reverse dep map from all cached package data.
+func (g *Graph) rebuildDependents() {
+	g.dependents = make(map[string][]string)
 	seen := map[string]map[string]bool{}
-	for _, p := range pkgs {
-		allImports := append(append(p.Imports, p.TestImports...), p.XTestImports...)
-		for _, imp := range allImports {
-			if _, ok := seen[imp]; !ok {
-				seen[imp] = map[string]bool{}
-			}
-			if !seen[imp][p.ImportPath] {
-				seen[imp][p.ImportPath] = true
-				g.dependents[imp] = append(g.dependents[imp], p.ImportPath)
+	for _, pkgs := range g.modPackages {
+		for _, p := range pkgs {
+			allImports := append(append(p.Imports, p.TestImports...), p.XTestImports...)
+			for _, imp := range allImports {
+				if seen[imp] == nil {
+					seen[imp] = map[string]bool{}
+				}
+				if !seen[imp][p.ImportPath] {
+					seen[imp][p.ImportPath] = true
+					g.dependents[imp] = append(g.dependents[imp], p.ImportPath)
+				}
 			}
 		}
 	}
-
-	return nil
 }
 
 // AffectedTestPackages returns packages with tests that depend on the package
@@ -246,6 +268,52 @@ func (g *Graph) ModuleRoots() []string {
 func (g *Graph) FileToImport(file string) (string, bool) {
 	ip, ok := g.fileToImport[file]
 	return ip, ok
+}
+
+// ModuleForFile returns the module root directory for the given file path.
+// For known files it uses the graph; for unknown files it walks up to find go.mod.
+func (g *Graph) ModuleForFile(file string) (string, bool) {
+	if ip, ok := g.fileToImport[file]; ok {
+		return g.pkgModule[ip], true
+	}
+	dir := filepath.Dir(file)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// ReingestModules re-runs `go list` only for the given module roots, then
+// reconstructs the full graph from cached + fresh data.
+func (g *Graph) ReingestModules(dirtyRoots []string) error {
+	for _, modRoot := range dirtyRoots {
+		pkgs, err := goList(modRoot)
+		if err != nil {
+			fmt.Printf("warning: go list failed in %s: %v\n", modRoot, err)
+			continue
+		}
+		g.modPackages[modRoot] = pkgs
+	}
+
+	// Reconstruct all derived maps from the full cached data.
+	g.fileToImport = make(map[string]string)
+	g.hasTests = make(map[string]bool)
+	g.pkgModule = make(map[string]string)
+	g.pkgTestFiles = make(map[string][]string)
+	g.pkgDir = make(map[string]string)
+	g.pkgAllFiles = make(map[string][]string)
+
+	for modRoot, pkgs := range g.modPackages {
+		g.applyPackages(modRoot, pkgs)
+	}
+	g.rebuildDependents()
+	return nil
 }
 
 // SampleFile returns one arbitrary file path from the graph, useful for
