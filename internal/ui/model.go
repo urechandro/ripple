@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -853,6 +854,15 @@ func listenForFileChange(w *fsnotify.Watcher) tea.Cmd {
 			case ev, ok := <-w.Events:
 				if !ok {
 					return nil
+				}
+				if ev.Has(fsnotify.Create) {
+					if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
+						name := filepath.Base(ev.Name)
+						if name != ".git" && name != "vendor" && name != "node_modules" {
+							w.Add(ev.Name)
+						}
+						continue
+					}
 				}
 				isWrite := ev.Has(fsnotify.Write) || ev.Has(fsnotify.Create)
 				isGo := strings.HasSuffix(ev.Name, ".go")
