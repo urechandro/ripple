@@ -465,16 +465,17 @@ func execGit(dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// watchGoPackageDirs adds every directory under root (excluding .git/vendor)
-// to the fsnotify watcher.
 func watchGoPackageDirs(w *fsnotify.Watcher, root string) error {
+	skip := map[string]bool{
+		".git": true, "vendor": true, "node_modules": true,
+		"dist": true, "testdata": true, ".idea": true, ".vscode": true,
+	}
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules":
+			if skip[d.Name()] {
 				return filepath.SkipDir
 			}
 			return w.Add(path)

@@ -20,6 +20,11 @@ import (
 	"github.com/urechandro/ripple/internal/symbols"
 )
 
+var skipDirs = map[string]bool{
+	".git": true, "vendor": true, "node_modules": true,
+	"dist": true, "testdata": true, ".idea": true, ".vscode": true,
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 var (
@@ -857,8 +862,7 @@ func listenForFileChange(w *fsnotify.Watcher) tea.Cmd {
 				}
 				if ev.Has(fsnotify.Create) {
 					if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-						name := filepath.Base(ev.Name)
-						if name != ".git" && name != "vendor" && name != "node_modules" {
+						if !skipDirs[filepath.Base(ev.Name)] {
 							w.Add(ev.Name)
 						}
 						continue
