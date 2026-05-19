@@ -70,8 +70,9 @@ type testEventMsg struct {
 }
 type runDoneMsg struct{ gen int }
 type graphRebuiltMsg struct {
-	graph *depgraph.Graph
-	cg    *callgraph.Graph
+	graph      *depgraph.Graph
+	dirtyRoots []string           // modules whose call graph was rebuilt (nil = all)
+	cg         *callgraph.Graph   // new call graph covering dirtyRoots
 }
 
 // ── Debug info ────────────────────────────────────────────────────────────────
@@ -99,7 +100,7 @@ type pkgDebug struct {
 type Model struct {
 	root         string
 	graph        *depgraph.Graph
-	cg           *callgraph.Graph
+	cgs          map[string]*callgraph.Graph // module root → call graph
 	watcher      *fsnotify.Watcher
 	eventCh      chan runner.TestEvent
 	skipPatterns []string
@@ -138,11 +139,11 @@ type Model struct {
 
 }
 
-func New(root string, graph *depgraph.Graph, cg *callgraph.Graph, watcher *fsnotify.Watcher, skipPatterns []string, depth int, cgMethod callgraph.Method, testFlags []string) Model {
+func New(root string, graph *depgraph.Graph, cgs map[string]*callgraph.Graph, watcher *fsnotify.Watcher, skipPatterns []string, depth int, cgMethod callgraph.Method, testFlags []string) Model {
 	return Model{
 		root:         root,
 		graph:        graph,
-		cg:           cg,
+		cgs:          cgs,
 		watcher:      watcher,
 		eventCh:      make(chan runner.TestEvent, 256),
 		packages:          make(map[string]*packageResult),
@@ -154,6 +155,33 @@ func New(root string, graph *depgraph.Graph, cg *callgraph.Graph, watcher *fsnot
 		cgMethod:     cgMethod,
 		testFlags:    testFlags,
 	}
+}
+
+func (m Model) testsCovering(dirs map[string]bool, files []string, symbols []string) map[string][]string {
+	merged := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	for _, cg := range m.cgs {
+		for dir, tests := range cg.TestsCovering(dirs, files, symbols) {
+			if seen[dir] == nil {
+				seen[dir] = map[string]bool{}
+			}
+			for _, t := range tests {
+				if !seen[dir][t] {
+					seen[dir][t] = true
+					merged[dir] = append(merged[dir], t)
+				}
+			}
+		}
+	}
+	return merged
+}
+
+func (m Model) symbolCount() int {
+	total := 0
+	for _, cg := range m.cgs {
+		total += cg.SymbolCount()
+	}
+	return total
 }
 
 // skipReason returns the first matching skip pattern, or "" if not skipped.
@@ -206,7 +234,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.graph != nil {
 			m.graph = msg.graph
 		}
-		m.cg = msg.cg
+		if msg.cg != nil {
+			if msg.dirtyRoots == nil {
+				// Full rebuild — replace all entries.
+				m.cgs = map[string]*callgraph.Graph{}
+				for _, root := range m.graph.ModuleRoots() {
+					m.cgs[root] = msg.cg
+				}
+			} else {
+				for _, root := range msg.dirtyRoots {
+					m.cgs[root] = msg.cg
+				}
+			}
+		}
 		m.rebuildingGraph = false
 		m.refreshViewport()
 
@@ -346,7 +386,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for path := range files {
 			changedFilePaths = append(changedFilePaths, path)
 		}
-		testsByDir := m.cg.TestsCovering(affectedDirSet, changedFilePaths, allSymbols)
+		testsByDir := m.testsCovering(affectedDirSet, changedFilePaths, allSymbols)
 
 		var toRun []runner.PackageTest
 		for _, pkg := range affected {
@@ -523,7 +563,7 @@ func (m Model) renderHeader() string {
 	if m.running {
 		statusStr = runStyle.Render("● running")
 	} else if len(m.pkgOrder) == 0 {
-		statusStr = dimStyle.Render(fmt.Sprintf("watching %d files, %d symbols", m.graph.FileCount(), m.cg.SymbolCount()))
+		statusStr = dimStyle.Render(fmt.Sprintf("watching %d files, %d symbols", m.graph.FileCount(), m.symbolCount()))
 	} else {
 		statusStr = dimStyle.Render("done")
 	}
@@ -893,8 +933,8 @@ func rebuildIncremental(graph *depgraph.Graph, structuralFiles map[string]bool, 
 	}
 	return func() tea.Msg {
 		graph.ReingestModules(roots)
-		cg, _ := callgraph.Build(graph.ModuleRoots(), method)
-		return graphRebuiltMsg{graph: graph, cg: cg}
+		cg, _ := callgraph.Build(roots, method)
+		return graphRebuiltMsg{graph: graph, dirtyRoots: roots, cg: cg}
 	}
 }
 

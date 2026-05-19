@@ -92,8 +92,9 @@ func main() {
 		fatalf("depgraph: %v", err)
 	}
 
+	modRoots := graph.ModuleRoots()
 	fmt.Fprintf(os.Stderr, "Building call graph (%s)…\n", strings.ToUpper(string(cgMethod)))
-	cg, err := callgraph.Build(graph.ModuleRoots(), cgMethod)
+	cg, err := callgraph.Build(modRoots, cgMethod)
 	if err != nil {
 		fatalf("callgraph: %v", err)
 	}
@@ -101,6 +102,12 @@ func main() {
 	if *jsonFlag {
 		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *filesFlag, *baseFlag, testFlags)
 		return
+	}
+
+	// Build per-module call graph cache for scoped incremental rebuilds.
+	cgs := make(map[string]*callgraph.Graph, len(modRoots))
+	for _, mr := range modRoots {
+		cgs[mr] = cg
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -113,7 +120,7 @@ func main() {
 		fatalf("watching: %v", err)
 	}
 
-	model := ui.New(root, graph, cg, watcher, skipPatterns, *depthFlag, cgMethod, testFlags)
+	model := ui.New(root, graph, cgs, watcher, skipPatterns, *depthFlag, cgMethod, testFlags)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fatalf("tui: %v", err)
