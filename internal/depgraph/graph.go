@@ -207,6 +207,17 @@ func (g *Graph) AffectedTestPackages(changedFile string, depth int) []string {
 	return affected
 }
 
+// TestPackages returns all import paths that have test files.
+func (g *Graph) TestPackages() []string {
+	var pkgs []string
+	for pkg, has := range g.hasTests {
+		if has {
+			pkgs = append(pkgs, pkg)
+		}
+	}
+	return pkgs
+}
+
 // FileCount returns the number of Go source files being tracked.
 func (g *Graph) FileCount() int {
 	return len(g.fileToImport)

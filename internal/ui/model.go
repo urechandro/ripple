@@ -193,6 +193,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.running && m.cancelRun != nil {
 				m.cancelRun()
 			}
+		case "a":
+			if !m.running {
+				return m, m.startRunAll()
+			}
 		}
 		var vpCmd tea.Cmd
 		m.viewport, vpCmd = m.viewport.Update(msg)
@@ -656,7 +660,9 @@ func (m Model) renderFooter() string {
 		vHint = dimStyle.Render("v coverage")
 	}
 
-	hints := "  " + scrollHint + "   " + rHint + "   " + dHint + "   " + vHint
+	aHint := dimStyle.Render("a run all")
+
+	hints := "  " + scrollHint + "   " + rHint + "   " + aHint + "   " + dHint + "   " + vHint
 	if m.running {
 		hints += "   " + runStyle.Render("c cancel")
 	}
@@ -890,6 +896,49 @@ func rebuildIncremental(graph *depgraph.Graph, structuralFiles map[string]bool, 
 		cg, _ := callgraph.Build(graph.ModuleRoots(), method)
 		return graphRebuiltMsg{graph: graph, cg: cg}
 	}
+}
+
+func (m *Model) startRunAll() tea.Cmd {
+	if m.cancelRun != nil {
+		m.cancelRun()
+	}
+	m.eventCh = make(chan runner.TestEvent, 256)
+	m.packages = make(map[string]*packageResult)
+	m.pkgOrder = nil
+	m.pkgInOrder = make(map[string]bool)
+	m.lastStatus = ""
+	m.lastChanged = "all packages"
+	m.aborted = false
+	m.running = true
+	m.expectedTests = 0
+	m.expectedUnfiltered = 0
+	m.debugRun = debugRun{}
+	m.runGen++
+	var runCtx context.Context
+	runCtx, m.cancelRun = context.WithCancel(context.Background())
+
+	allPkgs := m.graph.TestPackages()
+	sort.Strings(allPkgs)
+
+	var toRun []runner.PackageTest
+	for _, pkg := range allPkgs {
+		if reason := m.skipReason(pkg); reason != "" {
+			m.packages[pkg] = &packageResult{importPath: pkg, status: "skipped", skipReason: reason}
+			m.pkgOrder = append(m.pkgOrder, pkg)
+			m.pkgInOrder[pkg] = true
+			continue
+		}
+		m.packages[pkg] = &packageResult{importPath: pkg, status: "running"}
+		m.expectedUnfiltered++
+		toRun = append(toRun, runner.PackageTest{ImportPath: pkg, Cover: m.coverage})
+	}
+
+	m.viewport.GotoTop()
+	m.refreshViewport()
+	return tea.Batch(
+		runTests(runCtx, m.runGen, groupByModule(m.graph, toRun), m.testFlags, m.eventCh),
+		listenForTestEvent(m.eventCh, m.runGen),
+	)
 }
 
 func (m Model) isStructuralChange(path string) bool {

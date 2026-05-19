@@ -55,6 +55,7 @@ All fields are optional. CLI flags override config values. Test flags from the c
 | Key | Action |
 |-----|--------|
 | `r` | Rebuild the call graph |
+| `a` | Run all tests |
 | `d` | Toggle debug view |
 | `v` | Toggle coverage |
 | `c` | Cancel running tests |
