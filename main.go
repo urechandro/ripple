@@ -29,6 +29,7 @@ func main() {
 	jsonFlag := flag.Bool("json", false, "non-interactive mode: output affected tests as JSON and exit")
 	runFlag := flag.Bool("run", false, "with -json: also run the affected tests and include results")
 	filesFlag := flag.String("files", "", "with -json: comma-separated list of changed files (default: detect from git diff)")
+	baseFlag := flag.String("base", "", "with -json: git ref to diff against (e.g. origin/main). Default: HEAD")
 	flag.Parse()
 
 	var cgMethod callgraph.Method
@@ -69,7 +70,7 @@ func main() {
 	}
 
 	if *jsonFlag {
-		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *filesFlag)
+		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *filesFlag, *baseFlag)
 		return
 	}
 
@@ -130,7 +131,7 @@ type jsonSummary struct {
 	PkgsSkipped int `json:"packages_skipped"`
 }
 
-func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, filesArg string) {
+func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, filesArg, baseRef string) {
 	// Determine changed files: from --files flag or git diff.
 	var changedFiles []string
 	if filesArg != "" {
@@ -145,7 +146,7 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 			changedFiles = append(changedFiles, f)
 		}
 	} else {
-		changedFiles = gitChangedGoFiles(root)
+		changedFiles = gitChangedGoFiles(root, baseRef)
 	}
 
 	if len(changedFiles) == 0 {
@@ -386,12 +387,22 @@ func writeJSON(v any) {
 }
 
 // gitChangedGoFiles returns .go files that have been modified according to git.
-func gitChangedGoFiles(root string) []string {
-	// Try staged+unstaged vs HEAD first, then unstaged only (for new repos).
-	for _, args := range [][]string{
-		{"diff", "--name-only", "HEAD", "--", "*.go"},
-		{"diff", "--name-only", "--", "*.go"},
-	} {
+// When baseRef is set (e.g. "origin/main"), it uses a three-dot diff to find
+// files changed on the current branch since it diverged from baseRef.
+func gitChangedGoFiles(root, baseRef string) []string {
+	var diffs [][]string
+	if baseRef != "" {
+		diffs = [][]string{
+			{"diff", "--name-only", baseRef + "...HEAD", "--", "*.go"},
+		}
+	} else {
+		diffs = [][]string{
+			{"diff", "--name-only", "HEAD", "--", "*.go"},
+			{"diff", "--name-only", "--", "*.go"},
+		}
+	}
+
+	for _, args := range diffs {
 		out, err := execGit(root, args...)
 		if err != nil {
 			continue

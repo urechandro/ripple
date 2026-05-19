@@ -31,6 +31,7 @@ Save a `.go` file and ripple will immediately run only the tests relevant to you
 | `-json` | | Non-interactive mode: print affected tests as JSON and exit |
 | `-run` | | With `-json`: also run the tests and include results |
 | `-files` | | With `-json`: comma-separated list of changed files (default: detect from `git diff`) |
+| `-base` | | With `-json`: git ref to diff against (e.g. `origin/main`). Default: `HEAD` |
 
 ### Keyboard shortcuts
 
@@ -60,26 +61,47 @@ CHA is the better default for most projects. Use RTA if you want tighter targeti
 
 ripple has a JSON mode designed for CI pipelines. Instead of running your full test suite on every PR, ripple finds which `.go` files changed, traces the blast radius through the dependency and call graphs, and runs only the affected tests.
 
-### GitHub Actions example
+### GitHub Action
+
+The easiest way to use ripple in CI — add this to your workflow:
 
 ```yaml
-- name: Build ripple
-  run: go install github.com/urechandro/ripple@latest
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0
 
-- name: Find changed Go files
-  id: changed
-  run: |
-    FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.go' | paste -sd, -)
-    echo "files=$FILES" >> "$GITHUB_OUTPUT"
+- uses: urechandro/ripple@v0
+  with:
+    method: cha     # conservative, never misses a test
+    depth: "-1"     # full transitive dependency walk
+    skip: integration
+```
 
-- name: Run affected tests
-  if: steps.changed.outputs.files != ''
-  run: |
-    OUTPUT=$(ripple -json -run -method cha -depth -1 -files "${{ steps.changed.outputs.files }}" 2>/dev/null)
+The action installs Go, builds ripple, diffs against the PR base branch, and runs only affected tests. It exposes `tests-passed`, `tests-failed`, and `json` outputs for downstream steps.
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `method` | `cha` | Call graph algorithm |
+| `depth` | `-1` | Reverse dep graph depth |
+| `skip` | `integration` | Packages to skip |
+| `go-version-file` | `go.mod` | Go version detection |
+| `ripple-version` | `latest` | Ripple version to install |
+
+### Manual setup
+
+If you prefer not to use the action:
+
+```yaml
+- run: go install github.com/urechandro/ripple@latest
+
+- run: |
+    OUTPUT=$(ripple -json -run -method cha -depth -1 -base "origin/${{ github.base_ref }}" 2>/dev/null)
     echo "$OUTPUT" | jq .
     FAILED=$(echo "$OUTPUT" | jq -r '.summary.tests_failed // 0')
     if [ "$FAILED" -gt 0 ]; then exit 1; fi
 ```
+
+The `-base` flag tells ripple which git ref to diff against, so it finds changed files automatically.
 
 ### Recommended CI settings
 

@@ -1,0 +1,86 @@
+name: "Ripple — affected tests only"
+description: "Run only the Go tests affected by changes in a pull request"
+branding:
+  icon: "zap"
+  color: "blue"
+
+inputs:
+  go-version-file:
+    description: "Path to go.mod for Go version detection"
+    default: "go.mod"
+  method:
+    description: "Call graph algorithm: cha (conservative) or rta (precise)"
+    default: "cha"
+  depth:
+    description: "Reverse dep graph depth: 0=changed only, 1=+direct importers, -1=full transitive"
+    default: "-1"
+  skip:
+    description: "Comma-separated substrings — packages whose import path matches are skipped"
+    default: "integration"
+  ripple-version:
+    description: "Ripple version to install (e.g. v0.2.0, latest)"
+    default: "latest"
+
+outputs:
+  json:
+    description: "Full JSON output from ripple"
+    value: ${{ steps.ripple.outputs.json }}
+  tests-passed:
+    description: "Number of tests that passed"
+    value: ${{ steps.ripple.outputs.tests_passed }}
+  tests-failed:
+    description: "Number of tests that failed"
+    value: ${{ steps.ripple.outputs.tests_failed }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+
+    - name: Install ripple
+      shell: bash
+      run: go install github.com/urechandro/ripple@${{ inputs.ripple-version }}
+
+    - name: Run affected tests
+      id: ripple
+      shell: bash
+      env:
+        INPUT_METHOD: ${{ inputs.method }}
+        INPUT_DEPTH: ${{ inputs.depth }}
+        INPUT_SKIP: ${{ inputs.skip }}
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        # Ensure the base branch is available for diffing.
+        git fetch origin "$BASE_REF" --depth=1 2>/dev/null || true
+
+        OUTPUT=$(ripple -json -run \
+          -method "$INPUT_METHOD" \
+          -depth "$INPUT_DEPTH" \
+          -skip "$INPUT_SKIP" \
+          -base "origin/$BASE_REF" \
+          2>/dev/null) || true
+
+        echo "$OUTPUT" | jq .
+
+        # Export outputs.
+        PASSED=$(echo "$OUTPUT" | jq -r '.summary.tests_passed // 0')
+        FAILED=$(echo "$OUTPUT" | jq -r '.summary.tests_failed // 0')
+        PKG_FAILED=$(echo "$OUTPUT" | jq -r '.summary.packages_failed // 0')
+
+        echo "json<<RIPPLE_EOF" >> "$GITHUB_OUTPUT"
+        echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+        echo "RIPPLE_EOF" >> "$GITHUB_OUTPUT"
+        echo "tests_passed=$PASSED" >> "$GITHUB_OUTPUT"
+        echo "tests_failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "=== Summary ==="
+        echo "Tests passed: $PASSED"
+        echo "Tests failed: $FAILED"
+        echo "Packages failed: $PKG_FAILED"
+
+        if [ "$FAILED" -gt 0 ] || [ "$PKG_FAILED" -gt 0 ]; then
+          exit 1
+        fi
