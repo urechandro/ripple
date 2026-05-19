@@ -30,13 +30,13 @@ type PackageTest struct {
 // TestEvents into the provided channel. pkgsByModule maps module root dir →
 // list of PackageTests to run within that module. Cancelling ctx kills all
 // running test processes immediately.
-func Run(ctx context.Context, pkgsByModule map[string][]PackageTest, events chan<- TestEvent) {
+func Run(ctx context.Context, pkgsByModule map[string][]PackageTest, extraFlags []string, events chan<- TestEvent) {
 	var wg sync.WaitGroup
 	for modRoot, pkgs := range pkgsByModule {
 		wg.Add(1)
 		go func(dir string, pkgs []PackageTest) {
 			defer wg.Done()
-			runInDir(ctx, dir, pkgs, events)
+			runInDir(ctx, dir, pkgs, extraFlags, events)
 		}(modRoot, pkgs)
 	}
 	wg.Wait()
@@ -44,7 +44,7 @@ func Run(ctx context.Context, pkgsByModule map[string][]PackageTest, events chan
 
 // runInDir groups packages by their RunFilter and issues one `go test` call per
 // distinct filter so that -run applies correctly per package.
-func runInDir(ctx context.Context, dir string, packages []PackageTest, events chan<- TestEvent) {
+func runInDir(ctx context.Context, dir string, packages []PackageTest, extraFlags []string, events chan<- TestEvent) {
 	// Group by (filter, cover): packages with the same settings share one invocation.
 	type groupKey struct {
 		filter string
@@ -72,14 +72,15 @@ func runInDir(ctx context.Context, dir string, packages []PackageTest, events ch
 		wg.Add(1)
 		go func(k groupKey, pkgs []string) {
 			defer wg.Done()
-			execTest(ctx, dir, k.filter, k.cover, pkgs, events)
+			execTest(ctx, dir, k.filter, k.cover, extraFlags, pkgs, events)
 		}(g.key, g.pkgs)
 	}
 	wg.Wait()
 }
 
-func execTest(ctx context.Context, dir, runFilter string, cover bool, packages []string, events chan<- TestEvent) {
+func execTest(ctx context.Context, dir, runFilter string, cover bool, extraFlags, packages []string, events chan<- TestEvent) {
 	args := []string{"test", "-json"}
+	args = append(args, extraFlags...)
 	if runFilter != "" {
 		args = append(args, "-run", runFilter)
 	}

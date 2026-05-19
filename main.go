@@ -16,6 +16,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	callgraph "github.com/urechandro/go-callgraph"
+	"github.com/urechandro/ripple/internal/config"
 	"github.com/urechandro/ripple/internal/depgraph"
 	"github.com/urechandro/ripple/internal/runner"
 	"github.com/urechandro/ripple/internal/symbols"
@@ -30,7 +31,47 @@ func main() {
 	runFlag := flag.Bool("run", false, "with -json: also run the affected tests and include results")
 	filesFlag := flag.String("files", "", "with -json: comma-separated list of changed files (default: detect from git diff)")
 	baseFlag := flag.String("base", "", "with -json: git ref to diff against (e.g. origin/main). Default: HEAD")
+
+	// Extract extra go test flags passed after "--".
+	// We strip them before flag.Parse so they don't interfere with ripple's own flags.
+	var testFlags []string
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "--" {
+			testFlags = os.Args[i+1:]
+			os.Args = os.Args[:i]
+			break
+		}
+	}
 	flag.Parse()
+
+	root, err := filepath.Abs(".")
+	if err != nil {
+		fatalf("abs path: %v", err)
+	}
+	if flag.NArg() > 0 {
+		root, err = filepath.Abs(flag.Arg(0))
+		if err != nil {
+			fatalf("abs path: %v", err)
+		}
+	}
+
+	// Load .ripple.yaml — config values fill in for flags not explicitly set on the CLI.
+	cfg, err := config.Load(root)
+	if err != nil {
+		fatalf("config: %v", err)
+	}
+	explicitFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+	if cfg.Skip != nil && !explicitFlags["skip"] {
+		*skipFlag = *cfg.Skip
+	}
+	if cfg.Depth != nil && !explicitFlags["depth"] {
+		*depthFlag = *cfg.Depth
+	}
+	if cfg.Method != nil && !explicitFlags["method"] {
+		*methodFlag = *cfg.Method
+	}
+	testFlags = append(cfg.TestFlags, testFlags...)
 
 	var cgMethod callgraph.Method
 	switch strings.ToLower(*methodFlag) {
@@ -43,18 +84,6 @@ func main() {
 	}
 
 	skipPatterns := strings.Split(*skipFlag, ",")
-
-	root, err := filepath.Abs(".")
-	if err != nil {
-		fatalf("abs path: %v", err)
-	}
-
-	if flag.NArg() > 0 {
-		root, err = filepath.Abs(flag.Arg(0))
-		if err != nil {
-			fatalf("abs path: %v", err)
-		}
-	}
 
 	// Progress messages go to stderr so stdout stays clean for JSON mode.
 	fmt.Fprintln(os.Stderr, "Building dependency graph…")
@@ -70,7 +99,7 @@ func main() {
 	}
 
 	if *jsonFlag {
-		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *filesFlag, *baseFlag)
+		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *filesFlag, *baseFlag, testFlags)
 		return
 	}
 
@@ -84,7 +113,7 @@ func main() {
 		fatalf("watching: %v", err)
 	}
 
-	model := ui.New(root, graph, cg, watcher, skipPatterns, *depthFlag, cgMethod)
+	model := ui.New(root, graph, cg, watcher, skipPatterns, *depthFlag, cgMethod, testFlags)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fatalf("tui: %v", err)
@@ -131,7 +160,7 @@ type jsonSummary struct {
 	PkgsSkipped int `json:"packages_skipped"`
 }
 
-func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, filesArg, baseRef string) {
+func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, filesArg, baseRef string, testFlags []string) {
 	// Determine changed files: from --files flag or git diff.
 	var changedFiles []string
 	if filesArg != "" {
@@ -258,7 +287,7 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 		}
 
 		go func() {
-			runner.Run(context.Background(), pkgsByModule, eventCh)
+			runner.Run(context.Background(), pkgsByModule, testFlags, eventCh)
 			close(eventCh)
 		}()
 

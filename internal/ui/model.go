@@ -105,6 +105,7 @@ type Model struct {
 	skipPatterns []string
 	depth        int
 	cgMethod     callgraph.Method
+	testFlags    []string
 
 	pendingFiles      map[string]bool // files changed but not yet processed
 	pendingStructural map[string]bool // structural changes awaiting rebuild
@@ -137,7 +138,7 @@ type Model struct {
 
 }
 
-func New(root string, graph *depgraph.Graph, cg *callgraph.Graph, watcher *fsnotify.Watcher, skipPatterns []string, depth int, cgMethod callgraph.Method) Model {
+func New(root string, graph *depgraph.Graph, cg *callgraph.Graph, watcher *fsnotify.Watcher, skipPatterns []string, depth int, cgMethod callgraph.Method, testFlags []string) Model {
 	return Model{
 		root:         root,
 		graph:        graph,
@@ -151,6 +152,7 @@ func New(root string, graph *depgraph.Graph, cg *callgraph.Graph, watcher *fsnot
 		skipPatterns: skipPatterns,
 		depth:        depth,
 		cgMethod:     cgMethod,
+		testFlags:    testFlags,
 	}
 }
 
@@ -390,7 +392,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoTop()
 		m.refreshViewport()
 		cmds := []tea.Cmd{
-			runTests(runCtx, m.runGen, groupByModule(m.graph, toRun), m.eventCh),
+			runTests(runCtx, m.runGen, groupByModule(m.graph, toRun), m.testFlags, m.eventCh),
 			listenForTestEvent(m.eventCh, m.runGen),
 		}
 		if rebuildCmd != nil {
@@ -850,9 +852,9 @@ func groupByModule(g *depgraph.Graph, pkgs []runner.PackageTest) map[string][]ru
 	return result
 }
 
-func runTests(ctx context.Context, gen int, pkgsByModule map[string][]runner.PackageTest, eventCh chan runner.TestEvent) tea.Cmd {
+func runTests(ctx context.Context, gen int, pkgsByModule map[string][]runner.PackageTest, testFlags []string, eventCh chan runner.TestEvent) tea.Cmd {
 	return func() tea.Msg {
-		runner.Run(ctx, pkgsByModule, eventCh)
+		runner.Run(ctx, pkgsByModule, testFlags, eventCh)
 		close(eventCh) // unblock any listeners on this channel
 		return runDoneMsg{gen: gen}
 	}

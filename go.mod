@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/urechandro/go-callgraph v0.1.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
