@@ -32,6 +32,23 @@ Save a `.go` file and ripple will immediately run only the tests relevant to you
 | `-run` | | With `-json`: also run the tests and include results |
 | `-files` | | With `-json`: comma-separated list of changed files (default: detect from `git diff`) |
 | `-base` | | With `-json`: git ref to diff against (e.g. `origin/main`). Default: `HEAD` |
+| `--` | | Everything after `--` is forwarded to `go test` (e.g. `ripple -- -race -timeout 30s`) |
+
+### Config file
+
+Create a `.ripple.yaml` in your project root to set defaults:
+
+```yaml
+skip: integration,e2e
+depth: 2
+method: rta
+test_flags:
+  - -race
+  - -timeout
+  - 30s
+```
+
+All fields are optional. CLI flags override config values. Test flags from the config and `--` on the CLI are merged (CLI flags appended after config flags).
 
 ### Keyboard shortcuts
 
