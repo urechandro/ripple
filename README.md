@@ -32,6 +32,7 @@ Save a `.go` file and ripple will immediately run only the tests relevant to you
 | `-run` | | With `-json`: also run the tests and include results |
 | `-files` | | With `-json`: comma-separated list of changed files (default: detect from `git diff`) |
 | `-base` | | With `-json`: git ref to diff against (e.g. `origin/main`). Default: `HEAD` |
+| `-stream` | | With `-json`: emit NDJSON (header + per-test events + result) for live progress |
 | `--` | | Everything after `--` is forwarded to `go test` (e.g. `ripple -- -race -timeout 30s`) |
 
 ### Config file
@@ -49,6 +50,26 @@ test_flags:
 ```
 
 All fields are optional. CLI flags override config values. Test flags from the config and `--` on the CLI are merged (CLI flags appended after config flags).
+
+### Streaming JSON output
+
+`ripple -json -run -stream` emits one JSON object per line on stdout so long-lived consumers (editors, dashboards) can render progress as tests finish instead of waiting for the whole run. Order is always: one `header`, zero or more `event`, then exactly one terminal `result`.
+
+```
+{"type":"header","changed_files":[…],"affected_packages":[…]}
+{"type":"event","action":"run","package":"example.com/foo","test":"TestX"}
+{"type":"event","action":"pass","package":"example.com/foo","test":"TestX","elapsed":0.04}
+…
+{"type":"result","changed_files":[…],"affected_packages":[…with results…],"summary":{…}}
+```
+
+- `header` is the same shape as the legacy `-json` output minus `summary` — it's what ripple knows before any test runs.
+- `event` is per-`go test -json` event. `action` is one of `start`, `run`, `pass`, `fail`, `skip`, `output`, `build-fail`, `build-output`. Package-level events have no `test` field.
+- `result` is the full aggregated state, identical in shape to non-stream `-json` output. Treat it as the "run finished" signal.
+
+Note: the call graph build still writes `warning: …` lines on stdout before any JSON appears. Consumers should ignore any line that does not start with `{`.
+
+Without `-stream`, `-json` behavior is unchanged: a single indented document at end-of-run.
 
 ### Keyboard shortcuts
 
