@@ -32,6 +32,7 @@ func main() {
 	filesFlag := flag.String("files", "", "with -json: comma-separated list of changed files (default: detect from git diff)")
 	baseFlag := flag.String("base", "", "with -json: git ref to diff against (e.g. origin/main). Default: HEAD")
 	streamFlag := flag.Bool("stream", false, "with -json: emit NDJSON (header + per-test events + result) instead of a single document; lets long-lived consumers render progress live")
+	serveFlag := flag.Bool("serve", false, "long-running stdio daemon: read JSON requests on stdin, emit NDJSON envelopes on stdout, keep the call graph warm and rebuild incrementally on file changes — use this for editor integration")
 
 	// Extract extra go test flags passed after "--".
 	// We strip them before flag.Parse so they don't interfere with ripple's own flags.
@@ -103,6 +104,9 @@ func main() {
 	if *streamFlag && !*jsonFlag {
 		fatalf("-stream requires -json")
 	}
+	if *serveFlag && *jsonFlag {
+		fatalf("-serve and -json are mutually exclusive")
+	}
 
 	if *jsonFlag {
 		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *streamFlag, *filesFlag, *baseFlag, testFlags)
@@ -113,6 +117,11 @@ func main() {
 	cgs := make(map[string]*callgraph.Graph, len(modRoots))
 	for _, mr := range modRoots {
 		cgs[mr] = cg
+	}
+
+	if *serveFlag {
+		runServe(root, graph, cgs, skipPatterns, *depthFlag, cgMethod, testFlags)
+		return
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -180,13 +189,15 @@ type jsonSummary struct {
 // is byte-identical to the previous release; nothing else changes.
 
 type streamHeader struct {
-	Type             string            `json:"type"` // "header"
+	Type             string            `json:"type"`         // "header"
+	ID               string            `json:"id,omitempty"` // set in serve mode for request correlation
 	ChangedFiles     []jsonChangedFile `json:"changed_files"`
 	AffectedPackages []jsonPackage     `json:"affected_packages"`
 }
 
 type streamEvent struct {
-	Type    string  `json:"type"` // "event"
+	Type    string  `json:"type"`         // "event"
+	ID      string  `json:"id,omitempty"` // set in serve mode for request correlation
 	Action  string  `json:"action"`
 	Package string  `json:"package"`
 	Test    string  `json:"test,omitempty"`
@@ -195,35 +206,65 @@ type streamEvent struct {
 }
 
 type streamResult struct {
-	Type             string            `json:"type"` // "result"
+	Type             string            `json:"type"`         // "result"
+	ID               string            `json:"id,omitempty"` // set in serve mode for request correlation
 	ChangedFiles     []jsonChangedFile `json:"changed_files"`
 	AffectedPackages []jsonPackage     `json:"affected_packages"`
 	Summary          *jsonSummary      `json:"summary,omitempty"`
 }
 
-func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, stream bool, filesArg, baseRef string, testFlags []string) {
-	// Determine changed files: from --files flag or git diff.
-	var changedFiles []string
-	if filesArg != "" {
-		for _, f := range strings.Split(filesArg, ",") {
-			f = strings.TrimSpace(f)
-			if f == "" {
-				continue
-			}
-			if !filepath.IsAbs(f) {
-				f = filepath.Join(root, f)
-			}
-			changedFiles = append(changedFiles, f)
-		}
-	} else {
-		changedFiles = gitChangedGoFiles(root, baseRef)
-	}
+// streamError is a per-request failure emitted only in serve mode. It tells
+// the client this request id is finished without a result envelope; the
+// daemon itself keeps running.
+type streamError struct {
+	Type    string `json:"type"` // "error"
+	ID      string `json:"id,omitempty"`
+	Message string `json:"message"`
+}
 
+func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, stream bool, filesArg, baseRef string, testFlags []string) {
+	changedFiles := resolveChangedFiles(root, filesArg, baseRef)
+	cgs := map[string]*callgraph.Graph{}
+	for _, mr := range graph.ModuleRoots() {
+		cgs[mr] = cg
+	}
+	runJSONForFiles(root, graph, cgs, skipPatterns, depth, run, stream, "", changedFiles, testFlags)
+}
+
+// resolveChangedFiles translates the -files flag (comma-separated) or a git
+// diff against baseRef into absolute file paths.
+func resolveChangedFiles(root, filesArg, baseRef string) []string {
+	if filesArg == "" {
+		return gitChangedGoFiles(root, baseRef)
+	}
+	var out []string
+	for _, f := range strings.Split(filesArg, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !filepath.IsAbs(f) {
+			f = filepath.Join(root, f)
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// runJSONForFiles is the shared kernel between `-json` one-shot mode and the
+// long-running `-serve` daemon. The caller has already resolved which files
+// changed and may pass a non-empty `id` so the envelopes carry a request
+// correlation key (serve mode only — empty in one-shot mode).
+//
+// In serve mode, `cgs` is the per-module call graph cache that the daemon
+// keeps warm and rebuilds incrementally; in one-shot mode every entry points
+// at the same single graph.
+func runJSONForFiles(root string, graph *depgraph.Graph, cgs map[string]*callgraph.Graph, skipPatterns []string, depth int, run bool, stream bool, id string, changedFiles []string, testFlags []string) {
 	if len(changedFiles) == 0 {
 		out := jsonOutput{}
 		if stream {
-			emitStream(streamHeader{Type: "header"})
-			emitStream(streamResult{Type: "result"})
+			emitStream(streamHeader{Type: "header", ID: id})
+			emitStream(streamResult{Type: "result", ID: id})
 			return
 		}
 		writeJSON(out)
@@ -271,7 +312,7 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 			affectedDirSet[dir] = true
 		}
 	}
-	testsByDir := cg.TestsCovering(affectedDirSet, changedFiles, allSymbols)
+	testsByDir := mergedTestsCovering(cgs, affectedDirSet, changedFiles, allSymbols)
 
 	// Build package list with test filters.
 	skipReason := func(importPath string) string {
@@ -325,6 +366,7 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 	if stream {
 		emitStream(streamHeader{
 			Type:             "header",
+			ID:               id,
 			ChangedFiles:     fileInfos,
 			AffectedPackages: packages,
 		})
@@ -363,6 +405,7 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 			if stream {
 				emitStream(streamEvent{
 					Type:    "event",
+					ID:      id,
 					Action:  ev.Action,
 					Package: ev.Package,
 					Test:    ev.Test,
@@ -471,6 +514,7 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 	if stream {
 		emitStream(streamResult{
 			Type:             "result",
+			ID:               id,
 			ChangedFiles:     out.ChangedFiles,
 			AffectedPackages: out.AffectedPackages,
 			Summary:          out.Summary,
@@ -497,6 +541,37 @@ func emitStream(v any) {
 	if err := enc.Encode(v); err != nil {
 		fatalf("stream encode: %v", err)
 	}
+}
+
+// mergedTestsCovering iterates the per-module call-graph cache and unions
+// matching tests so packages in dirty modules (which got a fresh cg) and
+// clean modules (still on the original cg) are both considered. Mirrors
+// the TUI's `testsCovering` aggregation in internal/ui/model.go.
+func mergedTestsCovering(cgs map[string]*callgraph.Graph, dirs map[string]bool, files, symbols []string) map[string][]string {
+	merged := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	// Multiple module roots can share one *Graph (callgraph.Build is called
+	// with a slice of roots and returns a single graph covering all of them).
+	// Dedup by pointer identity so we don't pay for redundant lookups.
+	visited := map[*callgraph.Graph]bool{}
+	for _, cg := range cgs {
+		if cg == nil || visited[cg] {
+			continue
+		}
+		visited[cg] = true
+		for dir, tests := range cg.TestsCovering(dirs, files, symbols) {
+			if seen[dir] == nil {
+				seen[dir] = map[string]bool{}
+			}
+			for _, t := range tests {
+				if !seen[dir][t] {
+					seen[dir][t] = true
+					merged[dir] = append(merged[dir], t)
+				}
+			}
+		}
+	}
+	return merged
 }
 
 // gitChangedGoFiles returns .go files that have been modified according to git.

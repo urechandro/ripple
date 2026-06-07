@@ -33,6 +33,7 @@ Save a `.go` file and ripple will immediately run only the tests relevant to you
 | `-files` | | With `-json`: comma-separated list of changed files (default: detect from `git diff`) |
 | `-base` | | With `-json`: git ref to diff against (e.g. `origin/main`). Default: `HEAD` |
 | `-stream` | | With `-json`: emit NDJSON (header + per-test events + result) for live progress |
+| `-serve` | | Long-running stdio daemon for editor integration (see "Daemon mode" below) |
 | `--` | | Everything after `--` is forwarded to `go test` (e.g. `ripple -- -race -timeout 30s`) |
 
 ### Config file
@@ -70,6 +71,34 @@ All fields are optional. CLI flags override config values. Test flags from the c
 Note: the call graph build still writes `warning: …` lines on stdout before any JSON appears. Consumers should ignore any line that does not start with `{`.
 
 Without `-stream`, `-json` behavior is unchanged: a single indented document at end-of-run.
+
+### Daemon mode (`-serve`)
+
+`ripple -serve <root>` runs as a long-running stdio daemon. The call graph is built once at startup (the expensive part — typically 5–15 s on a large repo) and stays warm in memory; an internal fsnotify watcher marks modules dirty as `.go` files change, and the next request incrementally rebuilds only those modules. This is the mode editor integrations should use — spawning `ripple -json -run` on every save throws the warm graph away each time.
+
+Protocol:
+
+- **stdin** — one JSON request per line:
+  - `{"id":"<opaque>","cmd":"run","files":["abs/path.go", …]}` — run affected tests for these files. `id` is echoed in every envelope of the response.
+  - `{"cmd":"ping"}` — emits `{"type":"pong","id":"<id>"}` for liveness checks.
+  - `{"cmd":"shutdown"}` — daemon exits 0.
+  - EOF on stdin also shuts down cleanly.
+- **stdout** — same NDJSON envelopes as `-stream` (`header` / `event` / `result`), each carrying the request `id` as an optional field. An `error` envelope (`{"type":"error","id":"<id>","message":"…"}`) ends a request without a `result` — the daemon itself keeps running.
+- **stderr** — human-readable lifecycle messages: `ripple: serve ready`, `ripple: incremental rebuild N module(s) in Mms`, `ripple: serve shutting down`. Not part of the wire format.
+
+Example session:
+
+```
+$ ripple -serve /path/to/repo
+{"id":"1","cmd":"run","files":["/path/to/repo/foo/bar.go"]}
+{"type":"header","id":"1","changed_files":[…],"affected_packages":[…]}
+{"type":"event","id":"1","action":"pass","package":"example.com/foo/bar","test":"TestX","elapsed":0.04}
+…
+{"type":"result","id":"1","changed_files":[…],"affected_packages":[…],"summary":{…}}
+{"cmd":"shutdown"}
+```
+
+Per-request semantics match `-json -run -stream`: same package selection, same skip patterns, same `-method` / `-depth` flags carried over from the daemon's command line. `MarkProcessed` is called after each request so subsequent runs see only the delta against the prior save, matching the TUI watcher's behavior.
 
 ### Keyboard shortcuts
 
