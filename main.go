@@ -31,6 +31,7 @@ func main() {
 	runFlag := flag.Bool("run", false, "with -json: also run the affected tests and include results")
 	filesFlag := flag.String("files", "", "with -json: comma-separated list of changed files (default: detect from git diff)")
 	baseFlag := flag.String("base", "", "with -json: git ref to diff against (e.g. origin/main). Default: HEAD")
+	streamFlag := flag.Bool("stream", false, "with -json: emit NDJSON (header + per-test events + result) instead of a single document; lets long-lived consumers render progress live")
 
 	// Extract extra go test flags passed after "--".
 	// We strip them before flag.Parse so they don't interfere with ripple's own flags.
@@ -99,8 +100,12 @@ func main() {
 		fatalf("callgraph: %v", err)
 	}
 
+	if *streamFlag && !*jsonFlag {
+		fatalf("-stream requires -json")
+	}
+
 	if *jsonFlag {
-		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *filesFlag, *baseFlag, testFlags)
+		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *streamFlag, *filesFlag, *baseFlag, testFlags)
 		return
 	}
 
@@ -167,7 +172,36 @@ type jsonSummary struct {
 	PkgsSkipped int `json:"packages_skipped"`
 }
 
-func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, filesArg, baseRef string, testFlags []string) {
+// ── Streaming envelopes (one JSON object per line on stdout when -stream is set).
+//
+// Order is always: header, zero-or-more event, terminal result. The `type`
+// field discriminates so consumers can switch on it. A run with no tests still
+// produces header + result. The legacy single-document -json output (no -stream)
+// is byte-identical to the previous release; nothing else changes.
+
+type streamHeader struct {
+	Type             string            `json:"type"` // "header"
+	ChangedFiles     []jsonChangedFile `json:"changed_files"`
+	AffectedPackages []jsonPackage     `json:"affected_packages"`
+}
+
+type streamEvent struct {
+	Type    string  `json:"type"` // "event"
+	Action  string  `json:"action"`
+	Package string  `json:"package"`
+	Test    string  `json:"test,omitempty"`
+	Elapsed float64 `json:"elapsed,omitempty"`
+	Output  string  `json:"output,omitempty"`
+}
+
+type streamResult struct {
+	Type             string            `json:"type"` // "result"
+	ChangedFiles     []jsonChangedFile `json:"changed_files"`
+	AffectedPackages []jsonPackage     `json:"affected_packages"`
+	Summary          *jsonSummary      `json:"summary,omitempty"`
+}
+
+func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, stream bool, filesArg, baseRef string, testFlags []string) {
 	// Determine changed files: from --files flag or git diff.
 	var changedFiles []string
 	if filesArg != "" {
@@ -187,6 +221,11 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 
 	if len(changedFiles) == 0 {
 		out := jsonOutput{}
+		if stream {
+			emitStream(streamHeader{Type: "header"})
+			emitStream(streamResult{Type: "result"})
+			return
+		}
 		writeJSON(out)
 		return
 	}
@@ -283,6 +322,14 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 		AffectedPackages: packages,
 	}
 
+	if stream {
+		emitStream(streamHeader{
+			Type:             "header",
+			ChangedFiles:     fileInfos,
+			AffectedPackages: packages,
+		})
+	}
+
 	// Optionally run the tests.
 	if run && len(toRun) > 0 {
 		eventCh := make(chan runner.TestEvent, 256)
@@ -313,6 +360,16 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 		}
 
 		for ev := range eventCh {
+			if stream {
+				emitStream(streamEvent{
+					Type:    "event",
+					Action:  ev.Action,
+					Package: ev.Package,
+					Test:    ev.Test,
+					Elapsed: ev.Elapsed,
+					Output:  ev.Output,
+				})
+			}
 			st, ok := states[ev.Package]
 			if !ok {
 				continue
@@ -411,6 +468,15 @@ func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatter
 		}
 	}
 
+	if stream {
+		emitStream(streamResult{
+			Type:             "result",
+			ChangedFiles:     out.ChangedFiles,
+			AffectedPackages: out.AffectedPackages,
+			Summary:          out.Summary,
+		})
+		return
+	}
 	writeJSON(out)
 }
 
@@ -419,6 +485,17 @@ func writeJSON(v any) {
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(v); err != nil {
 		fatalf("json encode: %v", err)
+	}
+}
+
+// emitStream writes one compact JSON line to stdout. Stdout is unbuffered on
+// Go's side so the line reaches the consumer as soon as the kernel flushes.
+// Encoding failures during -stream mode are fatal — there's no useful recovery
+// when the output stream is corrupt mid-run.
+func emitStream(v any) {
+	enc := json.NewEncoder(os.Stdout)
+	if err := enc.Encode(v); err != nil {
+		fatalf("stream encode: %v", err)
 	}
 }
 
