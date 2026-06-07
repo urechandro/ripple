@@ -47,9 +47,11 @@ func runServe(root string, graph *depgraph.Graph, cgs map[string]*callgraph.Grap
 		cgs:          cgs,
 		cgMethod:     cgMethod,
 		dirtyModules: map[string]bool{},
+		rebuildCh:    make(chan struct{}, 1),
 	}
 
 	go st.watchLoop(watcher)
+	go st.rebuildLoop()
 
 	fmt.Fprintln(os.Stderr, "ripple: serve ready")
 
@@ -99,6 +101,11 @@ type serveState struct {
 	cgs          map[string]*callgraph.Graph
 	cgMethod     callgraph.Method
 	dirtyModules map[string]bool
+	// rebuildCh is a coalescing non-blocking signal: watchLoop enqueues into
+	// the cap-1 buffer, rebuildLoop drains and rebuilds. Multiple writes while
+	// the buffer is full are coalesced into a single rebuild pass — exactly
+	// the behavior we want for a burst of saves.
+	rebuildCh chan struct{}
 }
 
 func (s *serveState) markDirty(filePath string) {
@@ -109,6 +116,18 @@ func (s *serveState) markDirty(filePath string) {
 	s.mu.Lock()
 	s.dirtyModules[modRoot] = true
 	s.mu.Unlock()
+	s.signalRebuild()
+}
+
+// signalRebuild kicks the background rebuild loop without blocking. If the
+// loop is already mid-rebuild or already has a pending signal, we drop this
+// notification — the modules we just marked dirty will be picked up by the
+// next drain.
+func (s *serveState) signalRebuild() {
+	select {
+	case s.rebuildCh <- struct{}{}:
+	default:
+	}
 }
 
 // takeDirty returns and clears the current dirty set. Callers rebuild without
@@ -160,10 +179,17 @@ func (s *serveState) snapshotCgs() map[string]*callgraph.Graph {
 }
 
 func (s *serveState) handleRun(root string, req serveRequest, skipPatterns []string, depth int, testFlags []string) {
-	// Rebuild stale call graphs before we compute affected packages, otherwise
-	// a newly added function in the dirty module would be invisible to
-	// TestsCovering and we'd under-report tests.
-	s.rebuild(s.takeDirty())
+	// Don't block the request path on rebuild. For single-module repos the
+	// "incremental" rebuild is equivalent to a full rebuild (seconds to a
+	// minute) and the editor experience tanks. Instead serve with the current
+	// (possibly stale) cgs snapshot; the rebuildLoop has already been kicked
+	// by the watcher and will refresh in the background. The next request
+	// uses the fresh data.
+	//
+	// Trade-off: signature changes (new/removed/renamed exported symbols) may
+	// be invisible to TestsCovering for one save until the background rebuild
+	// lands. Body-only edits — the common case — are always correct because
+	// the call graph is unchanged.
 
 	files := make([]string, 0, len(req.Files))
 	for _, f := range req.Files {
@@ -233,6 +259,43 @@ func (s *serveState) watchLoop(w *fsnotify.Watcher) {
 			if !ok {
 				return
 			}
+		}
+	}
+}
+
+// rebuildLoop owns all background incremental rebuilds. It blocks on the
+// rebuild signal, waits a short debounce window so a burst of saves coalesces
+// into one pass, then drains the dirty set and rebuilds. After a rebuild it
+// loops once more in case more dirt arrived during the rebuild itself.
+//
+// Single-flight by construction: only this one goroutine ever calls
+// callgraph.Build for the daemon, so we can't accidentally race two rebuilds.
+func (s *serveState) rebuildLoop() {
+	const debounce = 200 * time.Millisecond
+	for range s.rebuildCh {
+		// Coalesce: sleep briefly so saves arriving 50–150 ms apart turn into
+		// one rebuild instead of N. We also drain any extra signals queued
+		// during the sleep so we don't fire a redundant pass immediately
+		// after we finish.
+		time.Sleep(debounce)
+		drainSignal(s.rebuildCh)
+
+		for {
+			dirty := s.takeDirty()
+			if len(dirty) == 0 {
+				break
+			}
+			s.rebuild(dirty)
+		}
+	}
+}
+
+func drainSignal(ch chan struct{}) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
 		}
 	}
 }

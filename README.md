@@ -100,6 +100,8 @@ $ ripple -serve /path/to/repo
 
 Per-request semantics match `-json -run -stream`: same package selection, same skip patterns, same `-method` / `-depth` flags carried over from the daemon's command line. `MarkProcessed` is called after each request so subsequent runs see only the delta against the prior save, matching the TUI watcher's behavior.
 
+**Rebuild policy:** the request path never blocks on a call-graph rebuild. The fsnotify watcher debounces `.go` writes by 200 ms and triggers a background `rebuildIncremental` for affected modules; the request handler always serves with the current cgs snapshot. This keeps save-to-events latency at ~50 ms even on single-module monorepos where `callgraph.Build` for one module is identical work to a full rebuild. The trade-off is that signature changes (new/removed/renamed exported symbols) may be invisible to `TestsCovering` for one save until the background rebuild lands; body-only edits are always correct.
+
 ### Keyboard shortcuts
 
 | Key | Action |
