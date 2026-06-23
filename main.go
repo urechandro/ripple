@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fsnotify/fsnotify"
@@ -33,6 +34,7 @@ func main() {
 	baseFlag := flag.String("base", "", "with -json: git ref to diff against (e.g. origin/main). Default: HEAD")
 	streamFlag := flag.Bool("stream", false, "with -json: emit NDJSON (header + per-test events + result) instead of a single document; lets long-lived consumers render progress live")
 	serveFlag := flag.Bool("serve", false, "long-running stdio daemon: read JSON requests on stdin, emit NDJSON envelopes on stdout, keep the call graph warm and rebuild incrementally on file changes — use this for editor integration")
+	timeoutFlag := flag.Duration("test-timeout", 0, "with -json/-serve: max wall-clock time for a test run before ripple cancels it and kills the go test processes; 0 disables ripple's own timeout (go test's built-in -timeout still applies)")
 
 	// Extract extra go test flags passed after "--".
 	// We strip them before flag.Parse so they don't interfere with ripple's own flags.
@@ -73,6 +75,13 @@ func main() {
 	if cfg.Method != nil && !explicitFlags["method"] {
 		*methodFlag = *cfg.Method
 	}
+	if cfg.TestTimeout != nil && !explicitFlags["test-timeout"] {
+		d, err := time.ParseDuration(*cfg.TestTimeout)
+		if err != nil {
+			fatalf("config: invalid test_timeout %q: %v", *cfg.TestTimeout, err)
+		}
+		*timeoutFlag = d
+	}
 	testFlags = append(cfg.TestFlags, testFlags...)
 
 	var cgMethod callgraph.Method
@@ -109,7 +118,7 @@ func main() {
 	}
 
 	if *jsonFlag {
-		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *streamFlag, *filesFlag, *baseFlag, testFlags)
+		runJSON(root, graph, cg, skipPatterns, *depthFlag, *runFlag, *streamFlag, *filesFlag, *baseFlag, testFlags, *timeoutFlag)
 		return
 	}
 
@@ -120,7 +129,7 @@ func main() {
 	}
 
 	if *serveFlag {
-		runServe(root, graph, cgs, skipPatterns, *depthFlag, cgMethod, testFlags)
+		runServe(root, graph, cgs, skipPatterns, *depthFlag, cgMethod, testFlags, *timeoutFlag)
 		return
 	}
 
@@ -222,13 +231,13 @@ type streamError struct {
 	Message string `json:"message"`
 }
 
-func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, stream bool, filesArg, baseRef string, testFlags []string) {
+func runJSON(root string, graph *depgraph.Graph, cg *callgraph.Graph, skipPatterns []string, depth int, run bool, stream bool, filesArg, baseRef string, testFlags []string, timeout time.Duration) {
 	changedFiles := resolveChangedFiles(root, filesArg, baseRef)
 	cgs := map[string]*callgraph.Graph{}
 	for _, mr := range graph.ModuleRoots() {
 		cgs[mr] = cg
 	}
-	runJSONForFiles(root, graph, cgs, skipPatterns, depth, run, stream, "", changedFiles, testFlags)
+	runJSONForFiles(root, graph, cgs, skipPatterns, depth, run, stream, "", changedFiles, testFlags, timeout)
 }
 
 // resolveChangedFiles translates the -files flag (comma-separated) or a git
@@ -259,7 +268,7 @@ func resolveChangedFiles(root, filesArg, baseRef string) []string {
 // In serve mode, `cgs` is the per-module call graph cache that the daemon
 // keeps warm and rebuilds incrementally; in one-shot mode every entry points
 // at the same single graph.
-func runJSONForFiles(root string, graph *depgraph.Graph, cgs map[string]*callgraph.Graph, skipPatterns []string, depth int, run bool, stream bool, id string, changedFiles []string, testFlags []string) {
+func runJSONForFiles(root string, graph *depgraph.Graph, cgs map[string]*callgraph.Graph, skipPatterns []string, depth int, run bool, stream bool, id string, changedFiles []string, testFlags []string, timeout time.Duration) {
 	if len(changedFiles) == 0 {
 		out := jsonOutput{}
 		if stream {
@@ -382,8 +391,19 @@ func runJSONForFiles(root string, graph *depgraph.Graph, cgs map[string]*callgra
 			}
 		}
 
+		// Bound the run when a timeout is configured so a hung test can't
+		// pin the serve daemon (and its go test child processes) forever.
+		// Cancelling ctx kills the go test processes; the producer goroutine
+		// then closes eventCh and the consumer below drains to completion.
+		ctx := context.Background()
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+
 		go func() {
-			runner.Run(context.Background(), pkgsByModule, testFlags, eventCh)
+			runner.Run(ctx, pkgsByModule, testFlags, eventCh)
 			close(eventCh)
 		}()
 
@@ -468,6 +488,23 @@ func runJSONForFiles(root string, graph *depgraph.Graph, cgs map[string]*callgra
 			case "build-fail", "build-output":
 				st.status = "build-fail"
 			}
+		}
+
+		// If the deadline fired, the test processes were killed mid-run and
+		// any package without a terminal event would otherwise be reported as
+		// a spurious pass. Surface the timeout instead. In stream mode an
+		// error envelope ends the request without a result, matching the
+		// daemon's protocol.
+		if ctx.Err() == context.DeadlineExceeded {
+			if stream {
+				emitStream(streamError{
+					Type:    "error",
+					ID:      id,
+					Message: fmt.Sprintf("test run exceeded -test-timeout (%s); cancelled", timeout),
+				})
+				return
+			}
+			fmt.Fprintf(os.Stderr, "ripple: test run exceeded -test-timeout (%s); cancelled\n", timeout)
 		}
 
 		// Merge results back into packages.

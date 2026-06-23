@@ -8,10 +8,11 @@ import (
 )
 
 type Config struct {
-	Skip      *string  `yaml:"skip"`
-	Depth     *int     `yaml:"depth"`
-	Method    *string  `yaml:"method"`
-	TestFlags []string `yaml:"test_flags"`
+	Skip        *string  `yaml:"skip"`
+	Depth       *int     `yaml:"depth"`
+	Method      *string  `yaml:"method"`
+	TestFlags   []string `yaml:"test_flags"`
+	TestTimeout *string  `yaml:"test_timeout"`
 }
 
 func Load(root string) (*Config, error) {
