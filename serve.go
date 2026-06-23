@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/tools/go/packages"
 
 	callgraph "github.com/urechandro/go-callgraph"
 	"github.com/urechandro/ripple/internal/depgraph"
@@ -153,19 +154,40 @@ func (s *serveState) rebuild(dirty []string) {
 		return
 	}
 	start := time.Now()
-	s.graph.ReingestModules(dirty)
-	cg, err := callgraph.Build(dirty, s.cgMethod)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ripple: incremental rebuild failed: %v\n", err)
+
+	// Load each dirty module's packages once (the expensive type-check pass)
+	// and feed both graphs from that single load: the call graph via
+	// BuildFromPackages and the dependency graph via ReingestModulesFromPackages.
+	// Previously ReingestModules ran its own `go list` on top of this load.
+	byRoot := make(map[string][]*packages.Package, len(dirty))
+	built := make(map[string]*callgraph.Graph, len(dirty))
+	for _, modRoot := range dirty {
+		pkgs, err := callgraph.LoadPackages(modRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ripple: load packages for %s: %v\n", modRoot, err)
+			continue
+		}
+		byRoot[modRoot] = pkgs
+		cg, err := callgraph.BuildFromPackages(pkgs, s.cgMethod)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ripple: call graph for %s: %v\n", modRoot, err)
+			continue
+		}
+		built[modRoot] = cg
+	}
+	if len(byRoot) == 0 {
+		fmt.Fprintln(os.Stderr, "ripple: incremental rebuild failed: no modules loaded")
 		return
 	}
+
+	s.graph.ReingestModulesFromPackages(byRoot)
 	s.mu.Lock()
-	for _, m := range dirty {
+	for m, cg := range built {
 		s.cgs[m] = cg
 	}
 	s.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "ripple: incremental rebuild %d module(s) in %s\n",
-		len(dirty), time.Since(start).Round(time.Millisecond))
+		len(byRoot), time.Since(start).Round(time.Millisecond))
 }
 
 func (s *serveState) snapshotCgs() map[string]*callgraph.Graph {
