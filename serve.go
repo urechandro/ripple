@@ -32,7 +32,7 @@ import (
 //
 // Stderr carries lifecycle messages (ready / incremental rebuild / shutdown)
 // — anything not on stdout is not part of the wire format.
-func runServe(root string, graph *depgraph.Graph, cgs map[string]*callgraph.Graph, skipPatterns []string, depth int, cgMethod callgraph.Method, testFlags []string) {
+func runServe(root string, graph *depgraph.Graph, cgs map[string]*callgraph.Graph, skipPatterns []string, depth int, cgMethod callgraph.Method, testFlags []string, runTimeout time.Duration) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fatalf("watcher: %v", err)
@@ -49,6 +49,7 @@ func runServe(root string, graph *depgraph.Graph, cgs map[string]*callgraph.Grap
 		cgMethod:     cgMethod,
 		dirtyModules: map[string]bool{},
 		rebuildCh:    make(chan struct{}, 1),
+		runTimeout:   runTimeout,
 	}
 
 	go st.watchLoop(watcher)
@@ -107,6 +108,9 @@ type serveState struct {
 	// the buffer is full are coalesced into a single rebuild pass — exactly
 	// the behavior we want for a burst of saves.
 	rebuildCh chan struct{}
+	// runTimeout bounds a single test run; 0 means no ripple-imposed limit.
+	// Immutable after construction, so it needs no lock.
+	runTimeout time.Duration
 }
 
 func (s *serveState) markDirty(filePath string) {
@@ -236,6 +240,7 @@ func (s *serveState) handleRun(root string, req serveRequest, skipPatterns []str
 		req.ID,
 		files,
 		testFlags,
+		s.runTimeout,
 	)
 
 	// Snapshot file contents so the next request only sees deltas. Without
