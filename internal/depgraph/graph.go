@@ -207,6 +207,54 @@ func (g *Graph) AffectedTestPackages(changedFile string, depth int) []string {
 	return affected
 }
 
+// ScopedRebuildSet returns, grouped by module root, the import paths that must
+// be loaded to build a call graph covering the blast radius of changedFiles.
+// This is the full reverse-dependency closure of each changed package (the
+// changed package plus everything that transitively imports it), bounded by
+// depth — the same set of packages that AffectedTestPackages can surface tests
+// from, plus the intermediate (non-test) packages on the paths between them.
+//
+// Loading only these packages (instead of the whole module) lets a scoped
+// callgraph.BuildFromPackages run analyze O(changed pkg + importers) rather
+// than O(module). packages.Load pulls each package's forward imports in as
+// type info automatically, so CHA dispatch resolution stays correct.
+func (g *Graph) ScopedRebuildSet(changedFiles []string, depth int) map[string][]string {
+	type entry struct {
+		pkg   string
+		level int
+	}
+
+	visited := map[string]bool{}
+	var queue []entry
+	for _, f := range changedFiles {
+		if startPkg, ok := g.fileToImport[f]; ok && !visited[startPkg] {
+			visited[startPkg] = true
+			queue = append(queue, entry{startPkg, 0})
+		}
+	}
+
+	byModule := map[string][]string{}
+	for len(queue) > 0 {
+		e := queue[0]
+		queue = queue[1:]
+
+		if modRoot, ok := g.pkgModule[e.pkg]; ok {
+			byModule[modRoot] = append(byModule[modRoot], e.pkg)
+		}
+
+		if depth >= 0 && e.level >= depth {
+			continue
+		}
+		for _, dep := range g.dependents[e.pkg] {
+			if !visited[dep] {
+				visited[dep] = true
+				queue = append(queue, entry{dep, e.level + 1})
+			}
+		}
+	}
+	return byModule
+}
+
 // TestPackages returns all import paths that have test files.
 func (g *Graph) TestPackages() []string {
 	var pkgs []string
