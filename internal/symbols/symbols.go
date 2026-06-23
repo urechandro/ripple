@@ -9,20 +9,41 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // lastRunContent caches the file content at the time it was last processed.
 // On the next change, we diff against this snapshot instead of HEAD so that
 // only genuinely new changes trigger tests.
-var lastRunContent = map[string][]byte{}
+//
+// In the -serve daemon this map is read/written from the request goroutine
+// (MarkProcessed / ChangedInFile) and pruned from the file-watcher goroutine
+// (Forget), so it is guarded by lastRunMu.
+var (
+	lastRunMu      sync.Mutex
+	lastRunContent = map[string][]byte{}
+)
 
 // MarkProcessed snapshots the current content of filename so that the next
 // call to ChangedInFile can diff against it instead of HEAD.
 func MarkProcessed(filename string) {
 	data, err := os.ReadFile(filename)
-	if err == nil {
-		lastRunContent[filename] = data
+	if err != nil {
+		return
 	}
+	lastRunMu.Lock()
+	lastRunContent[filename] = data
+	lastRunMu.Unlock()
+}
+
+// Forget drops the cached snapshot for filename, if any. Callers should invoke
+// this when a file is deleted or renamed away so the snapshot map doesn't
+// retain content for paths that no longer exist — otherwise a long-running
+// daemon accumulates a full copy of every file it ever processed.
+func Forget(filename string) {
+	lastRunMu.Lock()
+	delete(lastRunContent, filename)
+	lastRunMu.Unlock()
 }
 
 // ChangedInFile returns the names of functions/methods in filename whose body
@@ -34,7 +55,10 @@ func MarkProcessed(filename string) {
 // The returned source string describes which strategy was used.
 func ChangedInFile(filename string) (names []string, source string, err error) {
 	// 1. Diff against cached snapshot from last run.
-	if cached, ok := lastRunContent[filename]; ok {
+	lastRunMu.Lock()
+	cached, ok := lastRunContent[filename]
+	lastRunMu.Unlock()
+	if ok {
 		lines := diffCachedLines(filename, cached)
 		if lines != nil {
 			if len(lines) == 0 {
