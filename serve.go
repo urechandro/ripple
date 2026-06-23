@@ -272,6 +272,20 @@ func (s *serveState) watchLoop(w *fsnotify.Watcher) {
 					continue
 				}
 			}
+			// A path that disappeared (deleted or moved away) can't be
+			// stat'd to tell file from dir. Release any watch we held on it
+			// — a no-op if it wasn't a watched directory — so directory
+			// churn (test temp dirs, build output, git ops) doesn't leak
+			// fsnotify watches/FDs. For .go files, also drop the cached
+			// snapshot so symbols.lastRunContent doesn't retain content for
+			// files that no longer exist.
+			if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
+				_ = w.Remove(ev.Name)
+				if strings.HasSuffix(ev.Name, ".go") {
+					symbols.Forget(ev.Name)
+				}
+				continue
+			}
 			isWrite := ev.Has(fsnotify.Write) || ev.Has(fsnotify.Create)
 			if !isWrite || !strings.HasSuffix(ev.Name, ".go") {
 				continue
